@@ -92,14 +92,14 @@ function ownerRepo(store: Store, args: any): { owner: string; repo: string } {
     const [o, r] = args.full_name.split('/');
     return { owner: o, repo: r };
   }
-  return { owner: args.owner ?? store.login, repo: args.repo ?? args.name };
+  return { owner: args.owner ?? store.viewer(), repo: args.repo ?? args.name };
 }
 
 function callTool(store: Store, name: string, args: any): unknown {
   if (name === 'create_repo') {
     const rn = args.name ?? args.repo;
     if (!rn) throw new Error('name is required');
-    const r = store.getRepo(store.login, rn) ?? store.createRepo(store.login, rn, args.description ?? '');
+    const r = store.getRepo(store.viewer(), rn) ?? store.createRepo(rn, args.description ?? '');
     return { id: r.id, name: r.name, full_name: `${r.owner}/${r.name}`, owner: { login: r.owner } };
   }
   if (name === 'get_repo') {

@@ -77,7 +77,7 @@ function execOne(store: Store, query: string, variables: Record<string, unknown>
   }
 
   // viewer { login }
-  if (/\bviewer\b/.test(query)) return { data: { viewer: { login: store.login } } };
+  if (/\bviewer\b/.test(query)) return { data: { viewer: { login: store.viewer() } } };
 
   // Unknown field -> 200 with errors naming it.
   const field = query.match(/\{\s*([a-zA-Z_][a-zA-Z0-9_]*)/);
@@ -86,7 +86,7 @@ function execOne(store: Store, query: string, variables: Record<string, unknown>
 
 function repoById(store: Store, id: unknown): Repo | undefined {
   const num = typeof id === 'string' ? parseInt(id.replace(/^R_/, ''), 10) : (typeof id === 'number' ? id : NaN);
-  for (const r of store.listRepos(store.login)) if (r.id === num) return r;
+  for (const r of store.listRepos(store.viewer())) if (r.id === num) return r;
   return undefined;
 }
 

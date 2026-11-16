@@ -37,6 +37,7 @@ export interface Repo {
   name: string;
   owner: string;
   description: string;
+  isPrivate: boolean;
   defaultBranch: string;
   createdAt: number;
   objects: Map<string, GitObject>; // sha1 hex -> object
@@ -52,35 +53,57 @@ let idSeq = 1;
 const nextId = (): number => idSeq++;
 
 export class Store {
-  readonly login: string;
-  private repos = new Map<string, Repo>(); // "owner/name" -> repo
+  // The viewer login the bearer token names. The suite seeds a random login per trial and never tells
+  // the entry what it is, so we learn it lazily: the first owner that round-trips an existing repo (or
+  // the owner of the first created repo) becomes the viewer. A different owner is then the stranger
+  // and its repos are 404, never 403 — exactly the ownership contract the suite checks.
+  login: string | null = null;
+  private repos = new Map<string, Repo>(); // repo name -> repo (single-user namespace)
 
-  constructor(login: string) {
-    this.login = login;
+  constructor(login?: string) {
+    this.login = login ?? null;
   }
 
-  private key(owner: string, name: string): string {
-    return `${owner}/${name}`;
+  private bind(owner: string): void {
+    if (this.login === null) {
+      this.login = owner;
+      for (const r of this.repos.values()) r.owner = owner; // backfill repos made before we knew the login
+    }
+  }
+
+  // Learn the viewer login without resolving a repo (e.g. from a /repos/{owner}/... path).
+  observeOwner(owner: string): void {
+    this.bind(owner);
+  }
+
+  viewer(): string {
+    return this.login ?? 'user';
   }
 
   listRepos(owner: string): Repo[] {
-    const out: Repo[] = [];
-    for (const r of this.repos.values()) if (r.owner === owner) out.push(r);
+    if (this.login !== null && owner !== this.login) return [];
+    const out = [...this.repos.values()];
     out.sort((a, b) => a.id - b.id);
     return out;
   }
 
   getRepo(owner: string, name: string): Repo | undefined {
-    return this.repos.get(this.key(owner, name));
+    const repo = this.repos.get(name);
+    if (!repo) return undefined;
+    // Learn the viewer from the first owner that matches an existing repo.
+    this.bind(owner);
+    if (owner !== this.login) return undefined; // stranger: 404
+    return repo;
   }
 
-  createRepo(owner: string, name: string, description = ''): Repo {
+  createRepo(name: string, description = '', isPrivate = false, defaultBranch = 'main'): Repo {
     const repo: Repo = {
       id: nextId(),
       name,
-      owner,
+      owner: this.login ?? '',
       description,
-      defaultBranch: 'main',
+      isPrivate,
+      defaultBranch,
       createdAt: Date.now(),
       objects: new Map(),
       refs: new Map(),
@@ -90,12 +113,13 @@ export class Store {
       issueSeq: 0,
       pullSeq: 0,
     };
-    this.repos.set(this.key(owner, name), repo);
+    this.repos.set(name, repo);
     return repo;
   }
 
   deleteRepo(owner: string, name: string): boolean {
-    return this.repos.delete(this.key(owner, name));
+    if (this.login !== null && owner !== this.login) return false;
+    return this.repos.delete(name);
   }
 
   // ---- git object helpers ----

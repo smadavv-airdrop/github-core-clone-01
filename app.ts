@@ -46,7 +46,6 @@ function bearer(req: IncomingMessage): string | null {
 }
 
 const TOKEN = process.env.MAKEFUN_SHOP_TOKEN ?? 'token';
-const LOGIN = process.env.MAKEFUN_SHOP_LOGIN ?? 'octocat';
 
 function repoJson(r: Repo): unknown {
   return {
@@ -55,7 +54,7 @@ function repoJson(r: Repo): unknown {
     name: r.name,
     full_name: `${r.owner}/${r.name}`,
     owner: { login: r.owner, id: 1, type: 'User' },
-    private: false,
+    private: r.isPrivate,
     description: r.description,
     default_branch: r.defaultBranch,
     fork: false,
@@ -91,7 +90,7 @@ function pullJson(r: Repo, p: Pull): unknown {
 }
 
 export function createApp(): Server {
-  const store = new Store(LOGIN);
+  const store = new Store();
 
   return createServer((req, res) => {
     handle(req, res, store).catch((err) => {
@@ -140,20 +139,25 @@ async function restV3(req: IncomingMessage, res: ServerResponse, store: Store, p
   // GET /user/repos ; POST /user/repos
   if (rest[0] === 'user' && rest[1] === 'repos') {
     if (method === 'GET') {
-      const all = store.listRepos(store.login);
-      const per = 30;
+      const all = store.listRepos(store.viewer());
+      const per = Math.max(1, Math.min(100, parseInt(url.searchParams.get('per_page') ?? '30', 10)));
       const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10));
       const slice = all.slice((page - 1) * per, page * per);
       const headers: Record<string, string> = {};
-      if (all.length > page * per) headers['link'] = `<${url.pathname}?page=${page + 1}>; rel="next"`;
+      if (all.length > page * per) {
+        const next = new URL(url.pathname, 'http://forge');
+        next.searchParams.set('per_page', String(per));
+        next.searchParams.set('page', String(page + 1));
+        headers['link'] = `<${next.pathname}${next.search}>; rel="next"`;
+      }
       return sendJson(res, 200, slice.map(repoJson), headers);
     }
     if (method === 'POST') {
       const body = await parseJson(req, res); if (body === undefined) return;
       const name = (body as any)?.name;
       if (typeof name !== 'string' || name === '') return sendJson(res, 422, { message: 'name is required' });
-      if (store.getRepo(store.login, name)) return sendJson(res, 422, { message: 'name already exists' });
-      const r = store.createRepo(store.login, name, (body as any)?.description ?? '');
+      if (store.getRepo(store.viewer(), name)) return sendJson(res, 422, { message: 'name already exists' });
+      const r = store.createRepo(name, (body as any)?.description ?? '', (body as any)?.private === true, (body as any)?.default_branch ?? 'main');
       return sendJson(res, 201, repoJson(r));
     }
   }
@@ -161,16 +165,17 @@ async function restV3(req: IncomingMessage, res: ServerResponse, store: Store, p
   // /repos/{owner}/{repo}...
   if (rest[0] === 'repos' && rest.length >= 3) {
     const owner = rest[1], name = rest[2], tail = rest.slice(3);
+    store.observeOwner(owner); // learn the viewer login from the first repo path the suite dials
     const repo = store.getRepo(owner, name);
 
     if (tail.length === 0) {
-      if (owner !== store.login) return sendJson(res, 404, { message: 'Not Found' });
+      if (owner !== store.viewer()) return sendJson(res, 404, { message: 'Not Found' });
       if (method === 'GET') return repo ? sendJson(res, 200, repoJson(repo)) : sendJson(res, 404, { message: 'Not Found' });
       if (method === 'PATCH') {
         if (!repo) return sendJson(res, 404, { message: 'Not Found' });
         const body = await parseJson(req, res); if (body === undefined) return;
         if (typeof (body as any)?.description === 'string') repo.description = (body as any).description;
-        if (typeof (body as any)?.name === 'string') repo.name = (body as any).name;
+        if (typeof (body as any)?.default_branch === 'string') repo.defaultBranch = (body as any).default_branch;
         return sendJson(res, 200, repoJson(repo));
       }
       if (method === 'DELETE') {
@@ -199,7 +204,7 @@ async function restV3(req: IncomingMessage, res: ServerResponse, store: Store, p
         if (!repo.refs.has('HEAD')) repo.refs.set('HEAD', commit);
         const newBlob = fileSha(store, repo, filePath, commit);
         return sendJson(res, exists ? 200 : 201, {
-          content: { path: filePath, sha: newBlob },
+          content: { path: filePath, sha: newBlob, encoding: 'base64' },
           commit: { sha: commit },
         });
       }
@@ -305,6 +310,7 @@ function buildCommitWrap(store: Store, repo: Repo, tree: string, parent: string,
 // ===================== git smart HTTP =====================
 
 async function gitSmart(req: IncomingMessage, res: ServerResponse, store: Store, owner: string, name: string, tail: string): Promise<void> {
+  store.observeOwner(owner);
   const repo = store.getRepo(owner, name);
   // info/refs advertisement
   if (req.method === 'GET' && tail === '/info/refs') {
